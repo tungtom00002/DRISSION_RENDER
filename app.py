@@ -42,6 +42,7 @@ def test_widget():
             'url': url,
             'pageTitle': title,
             'widgetLoaded': iframe_found,
+            'chromeVersion': chrome_version,
             'checkedAt': __import__('datetime').datetime.now().isoformat(),
         })
     except Exception as e:
