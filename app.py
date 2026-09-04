@@ -1,95 +1,66 @@
 import os
 import subprocess
 import time
-import socket
-import shutil
 from datetime import datetime
 from flask import Flask, request, jsonify
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 app = Flask(__name__)
 
-# Tự động tìm đường dẫn Chromium
-CHROME_PATH = shutil.which('chromium') or '/usr/bin/chromium'
+CHROME_PATH = '/usr/bin/chromium'
 DEBUG_PORT = 9222
 PROFILE_DIR = '/tmp/chrome_profile'
+
+_xvfb_proc = None
 _chrome_proc = None
 
-def wait_for_port(port, host="127.0.0.1", timeout=45.0):
-    """Thăm dò port bằng socket. Chờ tối đa 45s vì CPU Render rất yếu."""
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            with socket.create_connection((host, port), timeout=1):
-                return True
-        except OSError:
-            time.sleep(1)
-    return False
+def setup_environment():
+    global _xvfb_proc, _chrome_proc
+    
+    # 1. Khởi động màn hình ảo Xvfb (nếu chưa có)
+    if _xvfb_proc is None:
+        # Tạo màn hình ảo :99 với độ phân giải 1920x1080
+        _xvfb_proc = subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1920x1080x24'])
+        os.environ['DISPLAY'] = ':99'
+        time.sleep(2) # Chờ Xvfb khởi động
 
-def start_chrome_background():
-    global _chrome_proc
-    if _chrome_proc is not None and _chrome_proc.poll() is None:
-        return  # Chrome đang chạy ngon lành
-
-    print(f"🚀 Đang spawn Chrome ({CHROME_PATH}) tại port {DEBUG_PORT}...")
-    _chrome_proc = subprocess.Popen(
-        [
+    # 2. Spawn Chrome ở chế độ HEADED (KHÔNG dùng --headless)
+    if _chrome_proc is None or _chrome_proc.poll() is not None:
+        _chrome_proc = subprocess.Popen([
             CHROME_PATH,
             f'--remote-debugging-port={DEBUG_PORT}',
             f'--user-data-dir={PROFILE_DIR}',
-            '--headless=new',
+            # BỎ --headless đi! Chrome sẽ chạy trên màn hình ảo Xvfb
             '--no-first-run',
             '--no-default-browser-check',
             '--no-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-gpu',
             '--disable-blink-features=AutomationControlled',
             '--window-size=1920,1080',
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
+        ])
+        time.sleep(3) # Chờ Chrome bind port 9222
 
-    # Chờ port thực sự mở
-    if not wait_for_port(DEBUG_PORT):
-        # Nếu port không mở -> Chrome đã crash. In lỗi ra Log Render!
-        if _chrome_proc.poll() is not None:
-            _, err = _chrome_proc.communicate()
-            print(f"❌ CHROME CRASHED ON STARTUP:\n{err.decode('utf-8', errors='ignore')}")
-        raise Exception("Chrome failed to start and bind to port 9222")
-    
-    print("✅ Chrome đã khởi động và mở port thành công!")
-
-# 🔥 KHỞI ĐỘNG CHROME NGAY KHI FILE APP.PY ĐƯỢC LOAD (Tránh timeout request đầu)
-try:
-    start_chrome_background()
-except Exception as e:
-    print(f"⚠️ Lỗi khởi động Chrome ban đầu: {e}")
+def get_driver():
+    setup_environment()
+    co = ChromiumOptions()
+    co.set_local_port(DEBUG_PORT)
+    return ChromiumPage(co)
 
 @app.route('/test-widget')
 def test_widget():
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'Thiếu param ?url='}), 400
-    
-    # Kiểm tra xem Chrome có còn sống không, nếu chết thì hồi sinh
-    if _chrome_proc is None or _chrome_proc.poll() is not None:
-        try:
-            start_chrome_background()
-        except Exception as e:
-            return jsonify({'error': f'Chrome process failed: {str(e)}'}), 500
-
-    try:
-        co = ChromiumOptions()
-        co.set_local_port(DEBUG_PORT)
-        page = ChromiumPage(co)
         
+    try:
+        page = get_driver()
         page.get(url)
+        
+        # Locator chuẩn để bắt token
         locator = "xpath://input[@name='cf-turnstile-response' and @value!='']"
         solved, token = False, ''
         start = time.time()
         
-        # Chờ widget solve
         while time.time() - start < 45:
             ele = page.ele(locator, timeout=2)
             if ele:
@@ -113,7 +84,7 @@ def test_widget():
 
 @app.route('/')
 def index():
-    return 'Chrome-as-BAT mode on Render. GET /test-widget?url=...'
+    return 'Chrome Headed + Xvfb mode. GET /test-widget?url=...'
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
