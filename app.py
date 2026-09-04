@@ -1,83 +1,81 @@
 import os
 import subprocess
 import time
+import shutil
 import urllib.request
-from datetime import datetime
 from flask import Flask, request, jsonify
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 app = Flask(__name__)
 
 # ====== CẤU HÌNH ======
-CHROME_PATH = '/usr/bin/chromium'  # Đường dẫn Chrome do apt-get cài
+CHROME_PATH = '/usr/bin/chromium'   # Debian/Ubuntu: /usr/bin/chromium
 DEBUG_PORT = 9222
 PROFILE_DIR = '/tmp/chrome_profile'
 _chrome_proc = None
 
-def bat_equivalent():
-    """
-    Khởi động Chrome độc lập và chờ port DevTools thực sự mở.
-    """
+def _wait_for_chrome(timeout=30):
+    """Chờ Chrome mở port xong mới cho kết nối"""
+    for i in range(timeout):
+        try:
+            urllib.request.urlopen(
+                f'http://127.0.0.1:{DEBUG_PORT}/json/version',
+                timeout=1
+            )
+            print(f'✅ Chrome sẵn sàng sau {i+1}s')
+            return True
+        except Exception:
+            time.sleep(1)
+    return False
+
+def start_chrome():
     global _chrome_proc
-    
-    # 1. Kiểm tra xem process cũ còn sống và port còn thở không
+
+    # Nếu Chrome đang chạy rồi thì bỏ qua
     if _chrome_proc is not None and _chrome_proc.poll() is None:
         try:
-            req = urllib.request.urlopen(f'http://127.0.0.1:{DEBUG_PORT}/json/version', timeout=2)
-            if req.status == 200:
-                return  # Chrome vẫn đang chạy ngon
+            urllib.request.urlopen(
+                f'http://127.0.0.1:{DEBUG_PORT}/json/version', timeout=1
+            )
+            return  # vẫn sống, dùng lại
         except Exception:
-            pass  # Port chết, chuẩn bị spawn lại
+            pass  # chết rồi, spawn lại
 
-    # 2. Kiểm tra file Chrome có tồn tại không
-    if not os.path.exists(CHROME_PATH):
-        raise Exception(f"❌ Không tìm thấy Chrome tại {CHROME_PATH}. Kiểm tra lại Dockerfile đã cài chromium chưa.")
+    # Dọn profile cũ (tránh xung đột lock file)
+    if os.path.exists(PROFILE_DIR):
+        shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+        time.sleep(1)
 
-    print("🚀 Đang spawn Chromium process...")
+    # Kill chrome zombie (nếu có)
+    os.system('pkill -f "remote-debugging-port" 2>/dev/null || true')
+    time.sleep(1)
+
+    print('🚀 Đang spawn Chrome...')
     _chrome_proc = subprocess.Popen(
         [
             CHROME_PATH,
             f'--remote-debugging-port={DEBUG_PORT}',
-            '--remote-debugging-address=0.0.0.0',  # Bind mọi interface
+            '--remote-debugging-address=127.0.0.1',   # 👈 FIX IPv6 issue
             f'--user-data-dir={PROFILE_DIR}',
             '--headless=new',
             '--no-first-run',
             '--no-default-browser-check',
-            '--no-sandbox',
+            '--no-sandbox',                            # 👈 BẮT BUỘC trên Docker
+            '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--disable-software-rasterizer',  # Chống crash do không có GPU thật
             '--disable-blink-features=AutomationControlled',
             '--window-size=1920,1080',
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
-    # 3. Vòng lặp Health Check: Chờ port 9222 mở (tối đa 30s cho Render 0.1 CPU)
-    for i in range(30):
-        # Nếu process chết giữa chừng
-        if _chrome_proc.poll() is not None:
-            out = _chrome_proc.stdout.read()
-            print(f"💀 Chromium CRASHED ngay khi khởi động! Log:\n{out}")
-            raise Exception(f"Chromium crashed: {out[:500]}")
-        
-        # Thăm dò port
-        try:
-            req = urllib.request.urlopen(f'http://127.0.0.1:{DEBUG_PORT}/json/version', timeout=1)
-            if req.status == 200:
-                print(f"✅ Chromium DevTools ready sau {i+1}s!")
-                return
-        except Exception:
-            pass
-        
-        time.sleep(1)
-        
-    raise Exception("⏳ Timeout: Chromium không mở port 9222 sau 30s.")
+    if not _wait_for_chrome(30):
+        raise Exception('❌ Chrome không start được sau 30s. Kiểm tra log.')
 
 def get_driver():
-    bat_equivalent()
+    start_chrome()
     co = ChromiumOptions()
     co.set_local_port(DEBUG_PORT)
     return ChromiumPage(co)
@@ -87,40 +85,14 @@ def test_widget():
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'Thiếu param ?url='}), 400
-    
+
     try:
         page = get_driver()
         page.get(url)
-        
-        locator = "xpath://input[@name='cf-turnstile-response' and @value!='']"
-        solved, token = False, ''
-        start = time.time()
-        
-        while time.time() - start < 45:
-            ele = page.ele(locator, timeout=2)
-            if ele:
-                token = ele.attr('value') or ''
-                if token:
-                    solved = True
-                    break
-            time.sleep(1)
-            
-        return jsonify({
-            'url': url,
-            'pageTitle': page.title,
-            'widgetLoaded': solved,
-            'turnstileSolved': solved,
-            'tokenLength': len(token),
-            'tokenPreview': (token[:60] + '...') if token else None,
-            'checkedAt': datetime.now().isoformat(),
-        })
+        # ... logic xử lý tiếp theo
+        return jsonify({'pageTitle': page.title})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    # ⚠️ KHÔNG gọi page.quit() để giữ trust
-
-@app.route('/')
-def index():
-    return 'Chrome-as-BAT mode (Hardened). GET /test-widget?url=...'
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
