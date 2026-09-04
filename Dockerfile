@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Cài Chromium + fonts vào image (điều mà runtime thường không cho làm)
+# Cài chromium MỚI NHẤT có trong kho Debian (không pin để tránh lỗi "not found")
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-liberation \
