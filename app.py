@@ -23,12 +23,14 @@ def create_options():
 def wait_for_turnstile(page, max_wait=30):
     """
     Chờ input ẩn cf-turnstile-response xuất hiện VÀ có token.
-    Input này nằm ở light DOM (ngoài shadow root) nên luôn query được.
+    Dùng XPath để check luôn điều kiện value khác rỗng.
     """
     start = time.time()
+    locator = "xpath://input[@name='cf-turnstile-response' and @value!='']"
+    
     while time.time() - start < max_wait:
         try:
-            token_input = page.ele('css:input[name="cf-turnstile-response"]', timeout=1)
+            token_input = page.ele(locator, timeout=2)
             if token_input:
                 token = token_input.attr('value') or ''
                 if token:
@@ -49,9 +51,7 @@ def test_widget():
         page = ChromiumPage(create_options())
         page.get(url)
 
-        # 🔑 Locator chuẩn: input ẩn cf-turnstile-response
         solved, token = wait_for_turnstile(page)
-
         title = page.title
         chrome_version = page.run_cdp('Browser.getVersion')['product']
 
