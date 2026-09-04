@@ -1,57 +1,36 @@
 import os
-import time
 import subprocess
-import requests
-from flask import Flask, jsonify, request
+import time
+import atexit
+from datetime import datetime
+from flask import Flask, request, jsonify
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 app = Flask(__name__)
 
-# ============ CONFIGURATION ============
+# ====== CẤU HÌNH CHROME TRÊN RENDER (LINUX) ======
 CHROME_PATH = '/usr/bin/chromium'
 DEBUG_PORT = 9222
-PROFILE_DIR = '/tmp/chrome_profile'
-os.makedirs(PROFILE_DIR, exist_ok=True)
+PROFILE_DIR = '/tmp/chrome_profile'  # Profile sẽ sống dai suốt vòng đời của instance
+_chrome_proc = None
 
-# Singleton: Cờ đánh dấu Chrome đã được spawn chưa
-chrome_spawned = False
-
-def wait_for_chrome(port=9222, timeout=20):
-    """Chờ Chromium bind port và sẵn sàng nhận CDP"""
-    url = f"http://127.0.0.1:{port}/json/version"
-    for i in range(timeout):
-        try:
-            res = requests.get(url, timeout=1)
-            if res.status_code == 200:
-                print(f"✅ Chrome đã sẵn sàng trên port {port} sau {i}s.")
-                return True
-        except requests.exceptions.RequestException:
-            pass
-        time.sleep(1)
-    print("❌ Chrome không thể khởi động.")
-    return False
-
-def spawn_chrome():
-    global chrome_spawned
-    if chrome_spawned:
-        return True
-
-    # 1. Check nếu đã có Chrome chạy sẵn (tránh spawn duplicate)
-    try:
-        res = requests.get(f'http://127.0.0.1:{DEBUG_PORT}/json/version', timeout=1)
-        if res.status_code == 200:
-            print("🔄 Chrome is already running.")
-            chrome_spawned = True
-            return True
-    except requests.exceptions.RequestException:
-        pass
-
-    print("🚀 Spawning Chrome subprocess...")
-    subprocess.Popen([
+def start_chrome_bat_style():
+    """
+    BẢN DỊCH CỦA FILE .BAT SANG LINUX:
+    Khởi động Chrome như 1 process ĐỘC LẬP, có profile riêng,
+    KHÔNG phải do DrissionPage spawn ra -> Tránh bị detect automation.
+    """
+    global _chrome_proc
+    # Nếu Chrome đang chạy rồi thì dùng lại (để giữ cookies/history -> tăng trust)
+    if _chrome_proc is not None and _chrome_proc.poll() is None:
+        return  
+    
+    print("🚀 Spawning Chrome as an independent process (BAT style)...")
+    _chrome_proc = subprocess.Popen([
         CHROME_PATH,
         f'--remote-debugging-port={DEBUG_PORT}',
         f'--user-data-dir={PROFILE_DIR}',
-        '--headless=new',
+        '--headless=new',                      # Headless mode thế hệ mới (khó bị detect hơn)
         '--no-first-run',
         '--no-default-browser-check',
         '--no-sandbox',
@@ -59,89 +38,72 @@ def spawn_chrome():
         '--disable-gpu',
         '--disable-blink-features=AutomationControlled',
         '--window-size=1920,1080',
-        # Anti-detect flags
-        '--disable-features=IsolateOrigins,site-per-process,BlockInsecurePrivateNetworkRequests',
-        '--disable-site-isolation-trials',
-        '--disable-web-security',
-        '--disable-features=TranslateUI'
+        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     ])
+    time.sleep(3)  # Chờ Chrome khởi động xong
+    print("✅ Chrome is running and listening on port", DEBUG_PORT)
 
-    # 2. ⏳ Wait-loop: Tránh BrowserConnectError
-    success = wait_for_chrome(DEBUG_PORT)
-    if success:
-        chrome_spawned = True
-    return success
+def cleanup():
+    """Đảm bảo tắt Chrome khi server bị tắt"""
+    global _chrome_proc
+    if _chrome_proc:
+        _chrome_proc.terminate()
+
+atexit.register(cleanup)
 
 def get_driver():
+    """Attach vào Chrome đã mở sẵn (giống hệt logic set_local_port ở local)"""
+    start_chrome_bat_style()
     co = ChromiumOptions()
     co.set_local_port(DEBUG_PORT)
-    co.auto_port(False)
     return ChromiumPage(co)
-
-# ============ ROUTES ============
-
-@app.route('/')
-def home():
-    """Health check endpoint cho Render"""
-    return jsonify({
-        "status": "online",
-        "service": "DrissionPage Cloudflare Bypass",
-        "chrome_port": DEBUG_PORT,
-        "usage": "/test-widget?url=https://example.com"
-    })
 
 @app.route('/test-widget')
 def test_widget():
+    url = request.args.get('url')
+    if not url:
+        return jsonify({'error': 'Thiếu param ?url='}), 400
+        
     try:
-        # 1. Đảm bảo Chrome đã được spawn
-        if not spawn_chrome():
-            return jsonify({"error": "Failed to start Chrome"}), 500
+        page = get_driver()
+        page.get(url)
+        
+        # Locator chuẩn: Chờ input ẩn có value (token) xuất hiện
+        locator = "xpath://input[@name='cf-turnstile-response' and @value!='']"
+        solved, token = False, ''
+        start = time.time()
+        
+        print(f"⏳ Đang chờ Turnstile solve cho {url}...")
+        while time.time() - start < 45:
+            ele = page.ele(locator, timeout=2)
+            if ele:
+                token = ele.attr('value') or ''
+                if token:
+                    solved = True
+                    print(f"✅ SOLVED sau {int(time.time() - start)}s!")
+                    break
+            time.sleep(1)
             
-        driver = get_driver()
-        
-        # 2. Dynamic URL - mặc định là gorouter
-        url = request.args.get('url', 'https://gorouter.app/sign-up')
-        print(f"🌐 Navigating to: {url}")
-        driver.get(url)
-        
-        # 3. Chờ trang load + Cloudflare JS chạy
-        time.sleep(5)
-        
-        # 4. Thăm dò token
-        token = driver.run_js("return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value || ''")
-        
-        # 5. Nếu chưa có token -> Interactive mode -> Fake click
-        if len(token) == 0:
-            print("🖱️ Token chưa có, thử click vào Turnstile iframe...")
-            iframe = driver.ele('css:iframe[src*="turnstile"]') or driver.ele('@name=cf-turnstile-iframe')
-            if iframe:
-                try:
-                    driver.actions.move_to(iframe).click()
-                    time.sleep(6)
-                    token = driver.run_js("return document.querySelector('input[name=\"cf-turnstile-response\"]')?.value || ''")
-                except Exception as e:
-                    print(f"Click iframe failed: {e}")
-            else:
-                print("⚠️ Không tìm thấy iframe Turnstile")
-
+        if not solved:
+            print("❌ Không có token sau 45s")
+            
         return jsonify({
-            "pageTitle": driver.title,
-            "targetUrl": url,
-            "tokenLength": len(token),
-            "tokenSnippet": token[:30] + "..." if len(token) > 30 else token,
-            "solved": len(token) > 0,
-            "timestamp": time.time()
+            'url': url,
+            'pageTitle': page.title,
+            'widgetLoaded': solved,
+            'turnstileSolved': solved,
+            'tokenLength': len(token),
+            'tokenPreview': (token[:60] + '...') if token else None,
+            'checkedAt': datetime.now().isoformat(),
         })
-        
     except Exception as e:
-        import traceback
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+        print(f"❌ Lỗi: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+    # ⚠️ TUYỆT ĐỐI KHÔNG GỌI page.quit() -> Giữ browser sống để tích lũy trust!
 
-# ============ APP START ============
+@app.route('/')
+def index():
+    return 'Chrome-as-BAT mode (subprocess). GET /test-widget?url=...'
+
 if __name__ == '__main__':
-    # Spawn Chrome ngay khi server Flask start
-    spawn_chrome()
-    
-    # Render dùng port từ ENV var 'PORT'
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
