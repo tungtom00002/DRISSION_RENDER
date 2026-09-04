@@ -1,8 +1,9 @@
 FROM python:3.11-slim
 
-# Cài Chromium + ĐẦY ĐỦ thư viện hệ thống để tránh crash ngầm
+# Cài Chromium + Xvfb (màn hình ảo) + thư viện hệ thống
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
+    xvfb \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -30,5 +31,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
+
 EXPOSE 10000
 CMD ["python", "app.py"]
