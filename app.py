@@ -136,6 +136,65 @@ def index():
       <li><code>/debug-iframes?url=...</code> - Liệt kê tất cả iframe</li>
     </ul>
     '''
+    
+@app.route('/debug-deep')
+def debug_deep():
+    url = request.args.get('url')
+    wait = int(request.args.get('wait', 20))
+    if not url:
+        return jsonify({'error': 'Thiếu param ?url='}), 400
 
+    page = None
+    try:
+        page = ChromiumPage(create_options())
+
+        # Hook console + error TRƯỚC khi trang chạy
+        page.add_init_js("""
+            window.__dbg = {console: [], errors: []};
+            ['log','warn','error','info'].forEach(lv => {
+                const orig = console[lv] ? console[lv].bind(console) : null;
+                console[lv] = function(...args){
+                    try {
+                        window.__dbg.console.push(lv + ': ' + args.map(a =>
+                            (typeof a === 'object' ? JSON.stringify(a) : String(a))
+                        ).join(' '));
+                    } catch(e){}
+                    if (orig) orig(...args);
+                };
+            });
+            window.addEventListener('error', e => window.__dbg.errors.push(e.message));
+        """)
+
+        page.get(url)
+        time.sleep(wait)
+
+        info = page.run_js("""
+            const out = {};
+            out.turnstileLoaded = typeof window.turnstile;
+            out.widgetContainers = document.querySelectorAll('.cf-turnstile, [data-sitekey], [id*="turnstile"]').length;
+            out.hiddenInputs = document.querySelectorAll('input[name="cf-turnstile-response"]').length;
+            out.iframes = Array.from(document.querySelectorAll('iframe')).map(f => f.src || '(no src)');
+            out.cloudflareResources = performance.getEntriesByType('resource')
+                .filter(r => r.name.includes('cloudflare'))
+                .map(r => ({
+                    file: r.name.split('?')[0].split('/').slice(-2).join('/'),
+                    httpStatus: r.responseStatus || 0,
+                    sizeKB: Math.round(r.transferSize / 1024),
+                    durationMs: Math.round(r.duration)
+                }));
+            out.consoleLogs = (window.__dbg || {}).console || [];
+            out.jsErrors = (window.__dbg || {}).errors || [];
+            return out;
+        """)
+
+        info['pageTitle'] = page.title
+        info['url'] = url
+        return jsonify(info)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if page:
+            page.quit()
+            
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
