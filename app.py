@@ -1,4 +1,6 @@
 import os
+import time
+from datetime import datetime
 from flask import Flask, request, jsonify
 from DrissionPage import ChromiumPage, ChromiumOptions
 
@@ -18,6 +20,24 @@ def create_options():
     )
     return co
 
+def wait_for_turnstile(page, max_wait=30):
+    """
+    Chờ input ẩn cf-turnstile-response xuất hiện VÀ có token.
+    Input này nằm ở light DOM (ngoài shadow root) nên luôn query được.
+    """
+    start = time.time()
+    while time.time() - start < max_wait:
+        try:
+            token_input = page.ele('css:input[name="cf-turnstile-response"]', timeout=1)
+            if token_input:
+                token = token_input.attr('value') or ''
+                if token:
+                    return True, token
+        except Exception:
+            pass
+        time.sleep(2)
+    return False, ''
+
 @app.route('/test-widget')
 def test_widget():
     url = request.args.get('url')
@@ -28,23 +48,22 @@ def test_widget():
     try:
         page = ChromiumPage(create_options())
         page.get(url)
-        page.wait(8)
+
+        # 🔑 Locator chuẩn: input ẩn cf-turnstile-response
+        solved, token = wait_for_turnstile(page)
 
         title = page.title
-        iframes = page.eles('tag:iframe')
-        iframe_found = any(
-            'challenges.cloudflare.com' in (i.attr('src') or '') for i in iframes
-        )
-        
-        # 👇 THÊM DÒNG NÀY để lấy version Chrome
         chrome_version = page.run_cdp('Browser.getVersion')['product']
 
         return jsonify({
             'url': url,
             'pageTitle': title,
-            'widgetLoaded': iframe_found,
-            'chromeVersion': chrome_version,  # ✅ Giờ mới dùng được
-            'checkedAt': __import__('datetime').datetime.now().isoformat(),
+            'chromeVersion': chrome_version,
+            'widgetLoaded': solved,
+            'turnstileSolved': solved,
+            'tokenLength': len(token),
+            'tokenPreview': (token[:60] + '...') if token else None,
+            'checkedAt': datetime.now().isoformat(),
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
