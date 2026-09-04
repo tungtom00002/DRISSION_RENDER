@@ -6,8 +6,8 @@ app = Flask(__name__)
 
 def create_options():
     co = ChromiumOptions()
-    co.set_browser_path('/usr/bin/chromium')   # Chrome cài trong Docker
-    co.headless()                               # Không màn hình trên server
+    co.set_browser_path('/usr/bin/chromium')
+    co.headless()
     co.set_argument('--no-sandbox')
     co.set_argument('--disable-dev-shm-usage')
     co.set_argument('--disable-gpu')
@@ -16,8 +16,6 @@ def create_options():
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
         '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     )
-    # 🔑 NẾU CÓ residential proxy, BỎ COMMENT dòng này để vượt Cloudflare:
-    # co.set_proxy('http://user:pass@host:port')
     return co
 
 @app.route('/test-widget')
@@ -30,19 +28,22 @@ def test_widget():
     try:
         page = ChromiumPage(create_options())
         page.get(url)
-        page.wait(8)  # Đợi Cloudflare challenge xử lý
+        page.wait(8)
 
         title = page.title
         iframes = page.eles('tag:iframe')
         iframe_found = any(
             'challenges.cloudflare.com' in (i.attr('src') or '') for i in iframes
         )
+        
+        # 👇 THÊM DÒNG NÀY để lấy version Chrome
+        chrome_version = page.run_cdp('Browser.getVersion')['product']
 
         return jsonify({
             'url': url,
             'pageTitle': title,
             'widgetLoaded': iframe_found,
-            'chromeVersion': chrome_version,
+            'chromeVersion': chrome_version,  # ✅ Giờ mới dùng được
             'checkedAt': __import__('datetime').datetime.now().isoformat(),
         })
     except Exception as e:
