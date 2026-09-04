@@ -31,6 +31,7 @@ def start_chrome_bat_style():
         f'--remote-debugging-port={DEBUG_PORT}',
         f'--user-data-dir={PROFILE_DIR}',
         '--no-first-run',
+        '--headless=new',
         '--no-default-browser-check',
         '--no-sandbox',
         '--window-size=1920,1080',
