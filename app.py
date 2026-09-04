@@ -10,38 +10,36 @@ app = Flask(__name__)
 CHROME_PATH = '/usr/bin/chromium'
 DEBUG_PORT = 9222
 PROFILE_DIR = '/tmp/chrome_profile'
-
-_xvfb_proc = None
 _chrome_proc = None
 
-def setup_environment():
-    global _xvfb_proc, _chrome_proc
-    
-    # 1. Khởi động màn hình ảo Xvfb (nếu chưa có)
-    if _xvfb_proc is None:
-        # Tạo màn hình ảo :99 với độ phân giải 1920x1080
-        _xvfb_proc = subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1920x1080x24'])
-        os.environ['DISPLAY'] = ':99'
-        time.sleep(2) # Chờ Xvfb khởi động
+def start_chrome_headed_on_virtual_display():
+    """
+    Chạy Chrome HEADED (không --headless) trên màn hình ảo Xvfb.
+    Chrome tưởng đang có màn hình thật -> giống hệt local.
+    """
+    global _chrome_proc
+    if _chrome_proc is not None and _chrome_proc.poll() is None:
+        return  # Đang chạy rồi
 
-    # 2. Spawn Chrome ở chế độ HEADED (KHÔNG dùng --headless)
-    if _chrome_proc is None or _chrome_proc.poll() is not None:
-        _chrome_proc = subprocess.Popen([
-            CHROME_PATH,
-            f'--remote-debugging-port={DEBUG_PORT}',
-            f'--user-data-dir={PROFILE_DIR}',
-            # BỎ --headless đi! Chrome sẽ chạy trên màn hình ảo Xvfb
-            '--no-first-run',
-            '--no-default-browser-check',
-            '--no-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-blink-features=AutomationControlled',
-            '--window-size=1920,1080',
-        ])
-        time.sleep(3) # Chờ Chrome bind port 9222
+    _chrome_proc = subprocess.Popen([
+        'xvfb-run', '-a',           # 👈 Chạy qua màn hình ảo
+        '--server-args=-screen 0 1920x1080x24',
+        CHROME_PATH,
+        f'--remote-debugging-port={DEBUG_PORT}',
+        f'--user-data-dir={PROFILE_DIR}',
+        '--profile-directory=Default',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1920,1080',
+        # ⚠️ KHÔNG có --headless=new
+    ])
+    time.sleep(5)  # Chờ Chrome + Xvfb khởi động
 
 def get_driver():
-    setup_environment()
+    start_chrome_headed_on_virtual_display()
     co = ChromiumOptions()
     co.set_local_port(DEBUG_PORT)
     return ChromiumPage(co)
@@ -51,17 +49,15 @@ def test_widget():
     url = request.args.get('url')
     if not url:
         return jsonify({'error': 'Thiếu param ?url='}), 400
-        
     try:
         page = get_driver()
         page.get(url)
-        
-        # Locator chuẩn để bắt token
+
         locator = "xpath://input[@name='cf-turnstile-response' and @value!='']"
         solved, token = False, ''
         start = time.time()
-        
-        while time.time() - start < 45:
+
+        while time.time() - start < 60:
             ele = page.ele(locator, timeout=2)
             if ele:
                 token = ele.attr('value') or ''
@@ -69,7 +65,7 @@ def test_widget():
                     solved = True
                     break
             time.sleep(1)
-            
+
         return jsonify({
             'url': url,
             'pageTitle': page.title,
@@ -81,10 +77,11 @@ def test_widget():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    # ⚠️ KHÔNG page.quit() — giữ browser sống để tích lũy trust
 
 @app.route('/')
 def index():
-    return 'Chrome Headed + Xvfb mode. GET /test-widget?url=...'
+    return 'Chrome HEADED on Xvfb. GET /test-widget?url=...'
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
