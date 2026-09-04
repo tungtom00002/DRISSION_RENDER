@@ -30,15 +30,10 @@ def start_chrome_bat_style():
         CHROME_PATH,
         f'--remote-debugging-port={DEBUG_PORT}',
         f'--user-data-dir={PROFILE_DIR}',
-        '--headless=new',                      # Headless mode thế hệ mới (khó bị detect hơn)
         '--no-first-run',
         '--no-default-browser-check',
         '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-blink-features=AutomationControlled',
         '--window-size=1920,1080',
-        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     ])
     time.sleep(3)  # Chờ Chrome khởi động xong
     print("✅ Chrome is running and listening on port", DEBUG_PORT)
