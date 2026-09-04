@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Cài Chromium + Xvfb (màn hình ảo) + thư viện hệ thống
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     xvfb \
