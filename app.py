@@ -1,38 +1,50 @@
 import os
+import subprocess
 import time
 from datetime import datetime
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 from DrissionPage import ChromiumPage, ChromiumOptions
 
 app = Flask(__name__)
 
-def create_options():
-    co = ChromiumOptions()
-    co.set_browser_path('/usr/bin/chromium')
-    co.headless()
-    co.set_argument('--no-sandbox')
-    co.set_argument('--disable-dev-shm-usage')
-    co.set_argument('--disable-gpu')
-    co.set_argument('--disable-blink-features=AutomationControlled')
-    co.set_argument('--window-size=1920,1080')
-    co.set_user_agent(
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-        '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    )
-    return co
+# ====== "ĐƯỜNG DẪN CHROME" TRÊN RENDER ======
+CHROME_PATH = '/usr/bin/chromium'
+DEBUG_PORT = 9222
+PROFILE_DIR = '/tmp/chrome_profile'   # profile sống suốt phiên instance
 
-def wait_for_turnstile(page, max_wait=30):
-    start = time.time()
-    locator = "xpath://input[@name='cf-turnstile-response' and @value!='']"
-    while time.time() - start < max_wait:
-        try:
-            token_input = page.ele(locator, timeout=2)
-            if token_input:
-                return True, token_input.attr('value')
-        except Exception:
-            pass
-        time.sleep(2)
-    return False, ''
+_chrome_proc = None
+
+def bat_equivalent():
+    """
+    BẢN DỊCH CỦA FILE .BAT SANG LINUX:
+    Khởi động Chrome như 1 process ĐỘC LẬP, có profile riêng,
+    KHÔNG phải do DrissionPage spawn ra.
+    """
+    global _chrome_proc
+    if _chrome_proc is not None and _chrome_proc.poll() is None:
+        return  # Chrome đang chạy sẵn rồi
+
+    _chrome_proc = subprocess.Popen([
+        CHROME_PATH,
+        f'--remote-debugging-port={DEBUG_PORT}',
+        f'--user-data-dir={PROFILE_DIR}',
+        '--headless=new',                      # Render không có màn hình
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-blink-features=AutomationControlled',
+        '--window-size=1920,1080',
+    ])
+    time.sleep(3)  # chờ Chrome khởi động
+
+def get_driver():
+    """Giống hệt code local của bạn: attach qua port"""
+    bat_equivalent()
+    co = ChromiumOptions()
+    co.set_local_port(DEBUG_PORT)
+    return ChromiumPage(co)
 
 @app.route('/test-widget')
 def test_widget():
@@ -40,19 +52,25 @@ def test_widget():
     if not url:
         return jsonify({'error': 'Thiếu param ?url='}), 400
 
-    page = None
     try:
-        page = ChromiumPage(create_options())
+        page = get_driver()
         page.get(url)
 
-        solved, token = wait_for_turnstile(page)
-        title = page.title
-        chrome_version = page.run_cdp('Browser.getVersion')['product']
+        locator = "xpath://input[@name='cf-turnstile-response' and @value!='']"
+        solved, token = False, ''
+        start = time.time()
+        while time.time() - start < 45:
+            ele = page.ele(locator, timeout=2)
+            if ele:
+                token = ele.attr('value') or ''
+                if token:
+                    solved = True
+                    break
+            time.sleep(1)
 
         return jsonify({
             'url': url,
-            'pageTitle': title,
-            'chromeVersion': chrome_version,
+            'pageTitle': page.title,
             'widgetLoaded': solved,
             'turnstileSolved': solved,
             'tokenLength': len(token),
@@ -61,140 +79,11 @@ def test_widget():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally:
-        if page:
-            page.quit()
-
-@app.route('/debug')
-def debug_html():
-    """Dump toàn bộ HTML sau khi chờ 15 giây để xem trang render ra gì."""
-    url = request.args.get('url')
-    wait = int(request.args.get('wait', 15))  # thời gian chờ, mặc định 15s
-    if not url:
-        return jsonify({'error': 'Thiếu param ?url='}), 400
-
-    page = None
-    try:
-        page = ChromiumPage(create_options())
-        page.get(url)
-        time.sleep(wait)
-        html = page.html
-        title = page.title
-        return Response(
-            f"<!-- TITLE: {title} -->\n<!-- WAITED: {wait}s -->\n"
-            f"<!-- LENGTH: {len(html)} chars -->\n"
-            f"<!-- Ctrl+F 'turnstile' or 'cf-' để tìm widget -->\n\n" + html,
-            mimetype='text/html; charset=utf-8'
-        )
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if page:
-            page.quit()
-
-@app.route('/debug-iframes')
-def debug_iframes():
-    """Liệt kê tất cả iframe có trong trang."""
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'error': 'Thiếu param ?url='}), 400
-
-    page = None
-    try:
-        page = ChromiumPage(create_options())
-        page.get(url)
-        time.sleep(10)
-        iframes = page.eles('tag:iframe')
-        result = []
-        for i, iframe in enumerate(iframes):
-            result.append({
-                'index': i,
-                'src': iframe.attr('src'),
-                'id': iframe.attr('id'),
-                'name': iframe.attr('name'),
-                'class': iframe.attr('class'),
-            })
-        return jsonify({
-            'url': url,
-            'pageTitle': page.title,
-            'iframeCount': len(result),
-            'iframes': result,
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if page:
-            page.quit()
+    # ⚠️ KHÔNG có page.quit()! Browser phải sống để giữ profile + trust
 
 @app.route('/')
 def index():
-    return '''
-    <h3>🥷 DrissionPage Debug Endpoints</h3>
-    <ul>
-      <li><code>/test-widget?url=...</code> - Test Turnstile (logic chính)</li>
-      <li><code>/debug?url=...&wait=15</code> - Dump toàn bộ HTML</li>
-      <li><code>/debug-iframes?url=...</code> - Liệt kê tất cả iframe</li>
-    </ul>
-    '''
-    
-@app.route('/debug-deep')
-def debug_deep():
-    url = request.args.get('url')
-    wait = int(request.args.get('wait', 20))
-    if not url:
-        return jsonify({'error': 'Thiếu param ?url='}), 400
+    return 'Chrome-as-BAT mode. GET /test-widget?url=...'
 
-    page = None
-    try:
-        page = ChromiumPage(create_options())
-
-        # Hook console + error TRƯỚC khi trang chạy
-        page.add_init_js("""
-            window.__dbg = {console: [], errors: []};
-            ['log','warn','error','info'].forEach(lv => {
-                const orig = console[lv] ? console[lv].bind(console) : null;
-                console[lv] = function(...args){
-                    try {
-                        window.__dbg.console.push(lv + ': ' + args.map(a =>
-                            (typeof a === 'object' ? JSON.stringify(a) : String(a))
-                        ).join(' '));
-                    } catch(e){}
-                    if (orig) orig(...args);
-                };
-            });
-            window.addEventListener('error', e => window.__dbg.errors.push(e.message));
-        """)
-
-        page.get(url)
-        time.sleep(wait)
-
-        info = page.run_js("""
-            const out = {};
-            out.turnstileLoaded = typeof window.turnstile;
-            out.widgetContainers = document.querySelectorAll('.cf-turnstile, [data-sitekey], [id*="turnstile"]').length;
-            out.hiddenInputs = document.querySelectorAll('input[name="cf-turnstile-response"]').length;
-            out.iframes = Array.from(document.querySelectorAll('iframe')).map(f => f.src || '(no src)');
-            out.cloudflareResources = performance.getEntriesByType('resource')
-                .filter(r => r.name.includes('cloudflare'))
-                .map(r => ({
-                    file: r.name.split('?')[0].split('/').slice(-2).join('/'),
-                    httpStatus: r.responseStatus || 0,
-                    sizeKB: Math.round(r.transferSize / 1024),
-                    durationMs: Math.round(r.duration)
-                }));
-            out.consoleLogs = (window.__dbg || {}).console || [];
-            out.jsErrors = (window.__dbg || {}).errors || [];
-            return out;
-        """)
-
-        info['pageTitle'] = page.title
-        info['url'] = url
-        return jsonify(info)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-    finally:
-        if page:
-            page.quit()
-            
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
